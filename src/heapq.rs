@@ -7,6 +7,14 @@ impl<T: Ord> HeapQ<T> {
         HeapQ { values: Vec::new() }
     }
 
+    pub fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut heap = HeapQ {
+            values: iter.into_iter().collect(),
+        };
+        heap.heapify();
+        heap
+    }
+
     pub fn push(&mut self, value: T) {
         self.values.push(value);
         self.siftup(self.values.len() - 1);
@@ -70,6 +78,18 @@ impl<T: Ord> HeapQ<T> {
             }
         }
     }
+
+    fn heapify(&mut self) {
+        let last_index = self.values.len() - 1;
+        if last_index <= 0 {
+            return;
+        }
+
+        let last_parent_index = (last_index - 1) / 2;
+        for i in (0..=last_parent_index).rev() {
+            self.siftdown(i);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -89,7 +109,7 @@ mod tests {
     #[test]
     fn length_after_push() {
         let mut heap = HeapQ::new();
-        heap.push(100);
+        heap.push(10);
         assert_eq!(heap.len(), 1);
         assert_eq!(heap.is_empty(), false);
     }
@@ -124,5 +144,29 @@ mod tests {
             assert_eq!(heap.len(), (i + 1) as usize);
             assert_eq!(heap.pop().unwrap(), i);
         }
+    }
+
+    #[test]
+    fn top_after_shuffled_heapify() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut numbers: Vec<i32> = (0..10).collect();
+        numbers.shuffle(&mut rng);
+
+        let mut heap = HeapQ::from_iter(numbers);
+
+        for i in (0..10).rev() {
+            assert_eq!(*heap.top().unwrap(), i);
+            assert_eq!(heap.len(), (i + 1) as usize);
+            assert_eq!(heap.pop().unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn top_after_from_iter() {
+        let arr = [1, 3, 2];
+
+        let mut heap = HeapQ::from_iter(arr);
+        assert_eq!(*heap.top().unwrap(), 3);
+        assert_eq!(heap.len(), 3);
     }
 }
