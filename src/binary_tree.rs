@@ -43,8 +43,8 @@ impl<T: Ord> Tree<T> {
                         } else {
                             node.right = Some(new);
                         }
-                        let new_ptr = new.as_mut();
-                        new_ptr.parent = Some(ptr);
+                        let new_node = new.as_mut();
+                        new_node.parent = Some(ptr);
                     }
                 }
             }
@@ -57,23 +57,18 @@ impl<T: Ord> Tree<T> {
 
     pub fn remove(&mut self, value: &T) -> bool {
         let closest = self.find_closest(&value);
-        let Some(mut ptr) = closest else {
+        let Some(ptr) = closest else {
             return false;
         };
 
         unsafe {
-            let node = ptr.as_mut();
+            let node = ptr.as_ref();
             if value.cmp(&node.value) != Ordering::Equal {
                 return false;
             }
-
-            self.remove_node(&node);
-
-            // recreate Box and let it be dropped automatically
-            let _box_to_drop = Box::from_raw(ptr.as_ptr());
         }
 
-        self.len -= 1;
+        self.remove_node(ptr);
         return true;
     }
 
@@ -95,15 +90,15 @@ impl<T: Ord> Tree<T> {
     }
 
     fn node_for_value(&self, value: T) -> NonNull<Node<T>> {
-        let box_node = Box::new(Node {
-            value: value,
-            left: None,
-            right: None,
-            parent: None,
-        });
-        let raw_ptr = Box::into_raw(box_node);
         // SAFETY: we just created raw pointer to non null box
-        unsafe { NonNull::new_unchecked(raw_ptr) }
+        unsafe {
+            NonNull::new_unchecked(Box::into_raw(Box::new(Node {
+                value: value,
+                left: None,
+                right: None,
+                parent: None,
+            })))
+        }
     }
 
     fn find_closest(&self, value: &T) -> Link<T> {
@@ -124,33 +119,41 @@ impl<T: Ord> Tree<T> {
         return prev;
     }
 
-    fn remove_node(&mut self, node: &Node<T>) {
+    fn remove_node(&mut self, node_ptr: NonNull<Node<T>>) {
         unsafe {
+            let node = node_ptr.as_ref();
             if let (Some(_), Some(_)) = (node.left, node.right) {
                 let before = node.before();
-                let before_node = before
-                    .expect("Node with left child should have before node")
-                    .as_mut();
+                let mut before_ptr = before.expect("Node with left child should have before node");
+                let before_node = before_ptr.as_mut();
 
                 let before_child = before_node.left;
-                self.fix_parent(&before_node, before_child);
+                self.fix_parent(before_ptr, before_child);
 
                 before_node.left = node.left;
                 before_node.right = node.right;
 
-                self.fix_parent(node, before);
+                self.fix_parent(node_ptr, before);
             } else {
                 let child = node.left.or(node.right);
-                self.fix_parent(node, child);
+                self.fix_parent(node_ptr, child);
             }
+
+            // recreate Box and let it be dropped automatically
+            let _box_to_drop = Box::from_raw(node_ptr.as_ptr());
         }
+
+        self.len -= 1;
     }
 
-    fn fix_parent(&mut self, old_node: &Node<T>, new_link: Link<T>) {
+    fn fix_parent(&mut self, old_node_ptr: NonNull<Node<T>>, new_link: Link<T>) {
         unsafe {
+            let old_node = old_node_ptr.as_ref();
             if let Some(mut parent_ptr) = old_node.parent {
                 let parent_node = parent_ptr.as_mut();
-                if parent_node.is_left_child(old_node) {
+                if parent_node.left.map_or(false, |ptr| {
+                    std::ptr::eq(ptr.as_ref(), old_node_ptr.as_ref())
+                }) {
                     parent_node.left = new_link;
                 } else {
                     parent_node.right = new_link;
@@ -167,17 +170,16 @@ impl<T: Ord> Tree<T> {
     }
 }
 
+impl<T: Ord> Drop for Tree<T> {
+    fn drop(&mut self) {
+        while let Some(ptr) = self.root {
+            println!("{}", self.len);
+            self.remove_node(ptr);
+        }
+    }
+}
+
 impl<T> Node<T> {
-    fn is_left_child(&self, node: &Node<T>) -> bool {
-        self.left
-            .map_or(false, |ptr| unsafe { std::ptr::eq(ptr.as_ref(), node) })
-    }
-
-    fn is_right_child(&self, node: &Node<T>) -> bool {
-        self.left
-            .map_or(false, |ptr| unsafe { std::ptr::eq(ptr.as_ref(), node) })
-    }
-
     fn before(&self) -> Link<T> {
         let Some(mut cur) = self.left else {
             return None;
