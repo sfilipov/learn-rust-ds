@@ -55,6 +55,28 @@ impl<T: Ord> Tree<T> {
         true
     }
 
+    pub fn remove(&mut self, value: &T) -> bool {
+        let closest = self.find_closest(&value);
+        let Some(mut ptr) = closest else {
+            return false;
+        };
+
+        unsafe {
+            let node = ptr.as_mut();
+            if value.cmp(&node.value) != Ordering::Equal {
+                return false;
+            }
+
+            self.remove_node(&node);
+
+            // recreate Box and let it be dropped automatically
+            let _box_to_drop = Box::from_raw(ptr.as_ptr());
+        }
+
+        self.len -= 1;
+        return true;
+    }
+
     pub fn contains(&self, value: &T) -> bool {
         let closest = self.find_closest(value);
         if let Some(ptr) = closest {
@@ -100,6 +122,73 @@ impl<T: Ord> Tree<T> {
             }
         }
         return prev;
+    }
+
+    fn remove_node(&mut self, node: &Node<T>) {
+        unsafe {
+            if let (Some(_), Some(_)) = (node.left, node.right) {
+                let before = node.before();
+                let before_node = before
+                    .expect("Node with left child should have before node")
+                    .as_mut();
+
+                let before_child = before_node.left;
+                self.fix_parent(&before_node, before_child);
+
+                before_node.left = node.left;
+                before_node.right = node.right;
+
+                self.fix_parent(node, before);
+            } else {
+                let child = node.left.or(node.right);
+                self.fix_parent(node, child);
+            }
+        }
+    }
+
+    fn fix_parent(&mut self, old_node: &Node<T>, new_link: Link<T>) {
+        unsafe {
+            if let Some(mut parent_ptr) = old_node.parent {
+                let parent_node = parent_ptr.as_mut();
+                if parent_node.is_left_child(old_node) {
+                    parent_node.left = new_link;
+                } else {
+                    parent_node.right = new_link;
+                }
+            } else {
+                self.root = new_link;
+            }
+
+            if let Some(mut new_ptr) = new_link {
+                let new_node = new_ptr.as_mut();
+                new_node.parent = old_node.parent;
+            }
+        }
+    }
+}
+
+impl<T> Node<T> {
+    fn is_left_child(&self, node: &Node<T>) -> bool {
+        self.left
+            .map_or(false, |ptr| unsafe { std::ptr::eq(ptr.as_ref(), node) })
+    }
+
+    fn is_right_child(&self, node: &Node<T>) -> bool {
+        self.left
+            .map_or(false, |ptr| unsafe { std::ptr::eq(ptr.as_ref(), node) })
+    }
+
+    fn before(&self) -> Link<T> {
+        let Some(mut cur) = self.left else {
+            return None;
+        };
+
+        unsafe {
+            while let Some(right) = cur.as_ref().right {
+                cur = right;
+            }
+        }
+        Some(cur)
     }
 }
 
@@ -148,5 +237,34 @@ mod tests {
             assert!(tree.contains(&i));
         }
         assert!(!tree.contains(&100));
+    }
+
+    #[test]
+    fn remove_and_contains() {
+        let mut tree = Tree::<i32>::new();
+        for i in 0..10 {
+            tree.insert(i);
+        }
+        for i in 0..10 {
+            assert!(tree.contains(&i));
+        }
+        for i in 0..10 {
+            for j in 0..i {
+                assert_eq!(tree.contains(&j), false);
+            }
+            for j in i..10 {
+                assert_eq!(tree.contains(&j), true);
+            }
+
+            let removed = tree.remove(&i);
+            assert_eq!(removed, true);
+
+            for j in 0..i + 1 {
+                assert_eq!(tree.contains(&j), false);
+            }
+            for j in i + 1..10 {
+                assert_eq!(tree.contains(&j), true, "{tree:#?}");
+            }
+        }
     }
 }
