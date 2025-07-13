@@ -11,6 +11,7 @@ pub struct Tree<T: Ord> {
 
 struct Node<T> {
     value: T,
+    height: i32,
     parent: Link<T>,
     left: Link<T>,
     right: Link<T>,
@@ -94,6 +95,7 @@ impl<T: Ord> Tree<T> {
         unsafe {
             NonNull::new_unchecked(Box::into_raw(Box::new(Node {
                 value: value,
+                height: 0,
                 left: None,
                 right: None,
                 parent: None,
@@ -193,7 +195,7 @@ impl<T: Ord> Drop for Tree<T> {
     }
 }
 
-impl<T> Node<T> {
+impl<T: Ord> Node<T> {
     fn before(&self) -> Link<T> {
         let Some(mut cur) = self.left else {
             return None;
@@ -205,6 +207,25 @@ impl<T> Node<T> {
             }
         }
         Some(cur)
+    }
+
+    fn update_height(&mut self) {
+        let left_height = link_height(self.left);
+        let right_height = link_height(self.right);
+        self.height = 1 + left_height.max(right_height);
+    }
+
+    fn balance_factor(&self) -> i32 {
+        let left_height = link_height(self.left);
+        let right_height = link_height(self.right);
+        return left_height - right_height;
+    }
+}
+
+fn link_height<T: Ord>(link: Link<T>) -> i32 {
+    match link {
+        Some(ptr) => unsafe { ptr.as_ref().height },
+        None => -1,
     }
 }
 
