@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 pub struct Tree<T: Ord> {
     root: Link<T>,
     len: usize,
-    _phantom: PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 struct Node<T> {
@@ -18,12 +18,26 @@ struct Node<T> {
 
 type Link<T> = Option<NonNull<Node<T>>>;
 
+pub struct IntoIter<T: Ord> {
+    tree: Tree<T>,
+}
+
+pub struct Iter<'a, T: Ord> {
+    next: Link<T>,
+    _marker: PhantomData<&'a T>,
+}
+
+pub struct IterMut<'a, T: Ord> {
+    next: Link<T>,
+    _marker: PhantomData<&'a mut T>,
+}
+
 impl<T: Ord> Tree<T> {
     pub fn new() -> Self {
         Tree {
             root: None,
             len: 0,
-            _phantom: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -89,6 +103,24 @@ impl<T: Ord> Tree<T> {
         self.len
     }
 
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter { tree: self }
+    }
+
+    pub fn iter<'a>(&'a self) -> Iter<'a, T> {
+        Iter {
+            next: self.first(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
+        IterMut {
+            next: self.first(),
+            _marker: PhantomData,
+        }
+    }
+
     fn node_for_value(&self, value: T) -> NonNull<Node<T>> {
         // SAFETY: we just created raw pointer to non null box
         unsafe {
@@ -119,13 +151,13 @@ impl<T: Ord> Tree<T> {
         return prev;
     }
 
-    fn remove_node(&mut self, node_ptr: NonNull<Node<T>>) {
+    fn remove_node(&mut self, node_ptr: NonNull<Node<T>>) -> T {
         unsafe {
             let node = node_ptr.as_ref();
             if let (Some(_), Some(_)) = (node.left, node.right) {
-                let before = node.before();
-                let mut before_ptr = before.expect("Node with left child should have before node");
-                let before_node = before_ptr.as_mut();
+                let before = node.before_sub();
+                let before_ptr = before.expect("Node with left child should have before node");
+                let before_node = before_ptr.as_ref();
 
                 self.replace_node(before_ptr, before_node.left);
                 self.replace_node(node_ptr, before);
@@ -136,9 +168,10 @@ impl<T: Ord> Tree<T> {
 
             // recreate Box and let it be dropped automatically
             let _box_to_drop = Box::from_raw(node_ptr.as_ptr());
+            let value = _box_to_drop.value;
+            self.len -= 1;
+            value
         }
-
-        self.len -= 1;
     }
 
     fn replace_node(&mut self, node_ptr: NonNull<Node<T>>, new_link: Link<T>) {
@@ -146,7 +179,7 @@ impl<T: Ord> Tree<T> {
             let node = node_ptr.as_ref();
             if let Some(mut parent_ptr) = node.parent {
                 let parent_node = parent_ptr.as_mut();
-                if eq_link_and_ptr(parent_node.left, node_ptr) {
+                if eq_link_and_node(parent_node.left, node) {
                     parent_node.left = new_link;
                 } else {
                     parent_node.right = new_link;
@@ -156,32 +189,74 @@ impl<T: Ord> Tree<T> {
             }
 
             if let Some(mut new_ptr) = new_link {
-                let new_node = new_ptr.as_mut();
-                new_node.parent = node.parent;
+                new_ptr.as_mut().parent = node.parent;
 
-                if !eq_link_and_ptr(node.left, new_ptr) {
-                    new_node.left = node.left;
-                    if let Some(mut new_left_ptr) = new_node.left {
-                        let new_left_node = new_left_ptr.as_mut();
-                        new_left_node.parent = new_link;
+                if !eq_link_and_node(node.left, new_ptr.as_ref()) {
+                    new_ptr.as_mut().left = node.left;
+                    if let Some(mut new_left_ptr) = new_ptr.as_ref().left {
+                        new_left_ptr.as_mut().parent = new_link;
                     }
                 }
 
-                if !eq_link_and_ptr(node.right, new_ptr) {
-                    new_node.right = node.right;
-                    if let Some(mut new_right_ptr) = new_node.right {
-                        let new_right_node = new_right_ptr.as_mut();
-                        new_right_node.parent = new_link;
+                if !eq_link_and_node(node.right, new_ptr.as_ref()) {
+                    new_ptr.as_mut().right = node.right;
+                    if let Some(mut new_right_ptr) = new_ptr.as_ref().right {
+                        new_right_ptr.as_mut().parent = new_link;
                     }
                 }
             }
         }
     }
+
+    fn first(&self) -> Link<T> {
+        unsafe {
+            let mut cur = self.root;
+            while let Some(cur_ptr) = cur {
+                match cur_ptr.as_ref().before() {
+                    None => return cur,
+                    before => cur = before,
+                }
+            }
+            None
+        }
+    }
 }
 
-fn eq_link_and_ptr<T>(a_link: Link<T>, b_ptr: NonNull<Node<T>>) -> bool {
+impl<T: Ord> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.tree.first().map(|ptr| self.tree.remove_node(ptr))
+    }
+}
+
+impl<'a, T: Ord> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            self.next.map(|ptr| {
+                let node = ptr.as_ref();
+                self.next = node.after();
+                &node.value
+            })
+        }
+    }
+}
+
+impl<'a, T: Ord> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            self.next.map(|mut ptr| {
+                self.next = ptr.as_ref().after();
+                &mut ptr.as_mut().value
+            })
+        }
+    }
+}
+
+fn eq_link_and_node<T>(a_link: Link<T>, b_ptr: &Node<T>) -> bool {
     a_link.map_or(false, |a_ptr| unsafe {
-        std::ptr::eq(a_ptr.as_ref(), b_ptr.as_ref())
+        std::ptr::eq(a_ptr.as_ref(), b_ptr)
     })
 }
 
@@ -195,6 +270,10 @@ impl<T: Ord> Drop for Tree<T> {
 
 impl<T> Node<T> {
     fn before(&self) -> Link<T> {
+        self.before_sub().or(self.before_above())
+    }
+
+    fn before_sub(&self) -> Link<T> {
         let Some(mut cur) = self.left else {
             return None;
         };
@@ -205,6 +284,53 @@ impl<T> Node<T> {
             }
         }
         Some(cur)
+    }
+
+    fn before_above(&self) -> Link<T> {
+        let mut cur = self;
+        while let Some(parent_ptr) = cur.parent {
+            unsafe {
+                let parent = parent_ptr.as_ref();
+                if eq_link_and_node(parent.left, cur) {
+                    cur = parent;
+                } else {
+                    return cur.parent;
+                }
+            }
+        }
+        None
+    }
+
+    fn after(&self) -> Link<T> {
+        self.after_sub().or(self.after_above())
+    }
+
+    fn after_sub(&self) -> Link<T> {
+        let Some(mut cur) = self.right else {
+            return None;
+        };
+
+        unsafe {
+            while let Some(left) = cur.as_ref().left {
+                cur = left;
+            }
+        }
+        Some(cur)
+    }
+
+    fn after_above(&self) -> Link<T> {
+        let mut cur = self;
+        while let Some(parent_ptr) = cur.parent {
+            unsafe {
+                let parent = parent_ptr.as_ref();
+                if eq_link_and_node(parent.right, cur) {
+                    cur = parent;
+                } else {
+                    return cur.parent;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -282,5 +408,113 @@ mod tests {
                 assert_eq!(tree.contains(&j), true, "{tree:#?}");
             }
         }
+    }
+
+    #[test]
+    fn first_after_asc_insert() {
+        let mut tree = Tree::new();
+        for i in 0..10 {
+            tree.insert(i);
+        }
+        assert_eq!(
+            tree.first().map(|ptr| unsafe { ptr.as_ref().value }),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn first_after_desc_insert() {
+        let mut tree = Tree::new();
+        for i in (0..10).rev() {
+            tree.insert(i);
+        }
+        assert_eq!(
+            tree.first().map(|ptr| unsafe { ptr.as_ref().value }),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn into_iter_asc() {
+        let mut tree = Tree::new();
+        for i in 0..10 {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.into_iter();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn into_iter_desc() {
+        let mut tree = Tree::new();
+        for i in (0..10).rev() {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.into_iter();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn iter_asc() {
+        let mut tree = Tree::new();
+        for i in 0..10 {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.iter();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(&i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn iter_desc() {
+        let mut tree = Tree::new();
+        for i in (0..10).rev() {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.iter();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(&i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn iter_mut_asc() {
+        let mut tree = Tree::new();
+        for i in 0..10 {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.iter_mut();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(&mut i.clone()));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn iter_mut_desc() {
+        let mut tree = Tree::new();
+        for i in (0..10).rev() {
+            tree.insert(i);
+        }
+
+        let mut iter = tree.iter_mut();
+        for i in 0..10 {
+            assert_eq!(iter.next(), Some(&mut i.clone()));
+        }
+        assert_eq!(iter.next(), None);
     }
 }
