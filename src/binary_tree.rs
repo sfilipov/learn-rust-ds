@@ -11,6 +11,7 @@ pub struct Tree<T: Ord> {
 
 struct Node<T> {
     value: T,
+    height: i32,
     parent: Link<T>,
     left: Link<T>,
     right: Link<T>,
@@ -59,6 +60,7 @@ impl<T: Ord> Tree<T> {
                         }
                         let new_node = new.as_mut();
                         new_node.parent = Some(ptr);
+                        self.update_ancestor_heights(closest);
                     }
                 }
             }
@@ -126,6 +128,7 @@ impl<T: Ord> Tree<T> {
         unsafe {
             NonNull::new_unchecked(Box::into_raw(Box::new(Node {
                 value: value,
+                height: 0,
                 left: None,
                 right: None,
                 parent: None,
@@ -158,12 +161,16 @@ impl<T: Ord> Tree<T> {
                 let before = node.before_sub();
                 let before_ptr = before.expect("Node with left child should have before node");
                 let before_node = before_ptr.as_ref();
+                let before_parent = before_node.parent;
 
                 self.replace_node(before_ptr, before_node.left);
                 self.replace_node(node_ptr, before);
+
+                self.update_ancestor_heights(before_parent);
             } else {
                 let child = node.left.or(node.right);
                 self.replace_node(node_ptr, child);
+                self.update_ancestor_heights(node.parent);
             }
 
             // recreate Box and let it be dropped automatically
@@ -220,6 +227,47 @@ impl<T: Ord> Tree<T> {
             None
         }
     }
+
+    fn update_ancestor_heights(&self, link: Link<T>) {
+        let mut cur = link;
+        while let Some(ptr) = cur {
+            self.update_height(cur);
+            unsafe {
+                cur = ptr.as_ref().parent;
+            }
+        }
+    }
+
+    fn update_height(&self, link: Link<T>) {
+        if let Some(mut ptr) = link {
+            unsafe {
+                let node = ptr.as_mut();
+                let left_height = self.link_height(node.left);
+                let right_height = self.link_height(node.right);
+                node.height = 1 + left_height.max(right_height);
+            }
+        }
+    }
+
+    fn balance_factor(&self, link: Link<T>) -> i32 {
+        if let Some(ptr) = link {
+            unsafe {
+                let node = ptr.as_ref();
+                let left_height = self.link_height(node.left);
+                let right_height = self.link_height(node.right);
+                return left_height - right_height;
+            }
+        } else {
+            0
+        }
+    }
+
+    fn link_height(&self, link: Link<T>) -> i32 {
+        match link {
+            Some(ptr) => unsafe { ptr.as_ref().height },
+            None => -1,
+        }
+    }
 }
 
 impl<T: Ord> Iterator for IntoIter<T> {
@@ -268,7 +316,7 @@ impl<T: Ord> Drop for Tree<T> {
     }
 }
 
-impl<T> Node<T> {
+impl<T: Ord> Node<T> {
     fn before(&self) -> Link<T> {
         self.before_sub().or(self.before_above())
     }
@@ -347,6 +395,7 @@ impl<T: fmt::Debug> fmt::Debug for Node<T> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("Node")
             .field("value", &self.value)
+            .field("height", &self.height)
             .field(
                 "parent",
                 &self.parent.map(|ptr| unsafe { &ptr.as_ref().value }),
