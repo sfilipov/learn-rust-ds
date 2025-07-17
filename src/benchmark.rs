@@ -1,5 +1,5 @@
 use clap::Parser;
-use learn_rust_ds::avl_unsafe;
+use learn_rust_ds::{avl_unsafe, avl_vec, tree};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -15,8 +15,9 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let mut tree = match args.tree.as_str() {
-        "unsafe" => avl_unsafe::Tree::new(),
+    let mut tree: Box<dyn tree::TreeOps<usize>> = match args.tree.as_str() {
+        "unsafe" => Box::new(avl_unsafe::Tree::new()),
+        "vec" => Box::new(avl_vec::Tree::new()),
         _ => panic!("Unexpected value for tree: {}", args.tree),
     };
 
@@ -28,9 +29,7 @@ fn main() {
     let size = args.size;
     let start = Instant::now();
     for i in 0..size {
-        assert_eq!(tree.len(), i);
         tree.insert(i);
-        assert!(tree.contains(&i));
     }
     let inserted = Instant::now();
     for i in 0..size {
@@ -38,7 +37,7 @@ fn main() {
     }
     let checked_contains = Instant::now();
     for i in 0..size {
-        assert!(tree.remove(&i));
+        tree.remove(&i);
     }
     let end = Instant::now();
 
