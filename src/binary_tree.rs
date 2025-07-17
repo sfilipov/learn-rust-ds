@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -61,6 +60,7 @@ impl<T: Ord> Tree<T> {
                         let new_node = new.as_mut();
                         new_node.parent = Some(ptr);
                         self.update_ancestor_heights(closest);
+                        self.rebalance_ancestors(closest);
                     }
                 }
             }
@@ -161,16 +161,24 @@ impl<T: Ord> Tree<T> {
                 let before = node.before_sub();
                 let before_ptr = before.expect("Node with left child should have before node");
                 let before_node = before_ptr.as_ref();
-                let before_parent = before_node.parent;
+
+                let ancestor_start = if before == node.left {
+                    before
+                } else {
+                    before_node.parent
+                };
 
                 self.replace_node(before_ptr, before_node.left);
                 self.replace_node(node_ptr, before);
 
-                self.update_ancestor_heights(before_parent);
+                self.update_ancestor_heights(ancestor_start);
+                self.rebalance_ancestors(ancestor_start);
             } else {
                 let child = node.left.or(node.right);
                 self.replace_node(node_ptr, child);
+
                 self.update_ancestor_heights(node.parent);
+                self.rebalance_ancestors(node.parent);
             }
 
             // recreate Box and let it be dropped automatically
@@ -225,6 +233,123 @@ impl<T: Ord> Tree<T> {
                 }
             }
             None
+        }
+    }
+
+    fn rebalance_ancestors(&mut self, link: Link<T>) {
+        let mut cur = link;
+        while let Some(ptr) = cur {
+            self.rebalance(cur);
+            unsafe {
+                cur = ptr.as_ref().parent;
+            }
+        }
+    }
+
+    fn rebalance(&mut self, link: Link<T>) {
+        unsafe {
+            let Some(ptr) = link else {
+                return;
+            };
+            let node = ptr.as_ref();
+            let balance_factor = self.balance_factor(link);
+            if balance_factor > 1 {
+                let mut height_start = link;
+                if self.balance_factor(node.left) < 0 {
+                    height_start = node.left;
+                    self.rotate_left(node.left);
+                }
+                self.rotate_right(link);
+                self.update_ancestor_heights(height_start);
+            } else if balance_factor < -1 {
+                let mut height_start = link;
+                if self.balance_factor(node.right) > 0 {
+                    height_start = node.right;
+                    self.rotate_right(node.right);
+                }
+                self.rotate_left(link);
+                self.update_ancestor_heights(height_start);
+            }
+        }
+    }
+
+    fn rotate_right(&mut self, x_link: Link<T>) -> Link<T> {
+        unsafe {
+            let Some(mut x_ptr) = x_link else {
+                return None;
+            };
+            let x = x_ptr.as_mut();
+            let y_link = x.left;
+            let Some(mut y_ptr) = y_link else {
+                return None;
+            };
+            let y = y_ptr.as_mut();
+            let t2 = y.right;
+
+            // fix parent -> y
+            if let Some(mut parent_ptr) = x.parent {
+                let parent_node = parent_ptr.as_mut();
+                if eq_link_and_node(parent_node.left, x) {
+                    parent_node.left = y_link;
+                } else {
+                    parent_node.right = y_link;
+                }
+            } else {
+                self.root = y_link;
+            }
+            y.parent = x.parent;
+
+            // fix y -> x
+            x.parent = y_link;
+            y.right = x_link;
+
+            // fix x -> t2
+            x.left = t2;
+            if let Some(mut t2_ptr) = t2 {
+                let t2_node = t2_ptr.as_mut();
+                t2_node.parent = x_link;
+            }
+            y_link
+        }
+    }
+
+    fn rotate_left(&mut self, x_link: Link<T>) -> Link<T> {
+        unsafe {
+            let Some(mut x_ptr) = x_link else {
+                return None;
+            };
+            let x = x_ptr.as_mut();
+            let y_link = x.right;
+            let Some(mut y_ptr) = y_link else {
+                return None;
+            };
+            let y = y_ptr.as_mut();
+            let t2 = y.left;
+
+            // fix parent -> y
+            if let Some(mut parent_ptr) = x.parent {
+                let parent_node = parent_ptr.as_mut();
+                if eq_link_and_node(parent_node.left, x) {
+                    parent_node.left = y_link;
+                } else {
+                    parent_node.right = y_link;
+                }
+            } else {
+                self.root = y_link;
+            }
+            y.parent = x.parent;
+
+            // fix y -> x
+            x.parent = y_link;
+            y.left = x_link;
+
+            // fix x -> t2
+            x.right = t2;
+            if let Some(mut t2_ptr) = t2 {
+                let t2_node = t2_ptr.as_mut();
+                t2_node.parent = x_link;
+            }
+            y_link
         }
     }
 
@@ -302,10 +427,8 @@ impl<'a, T: Ord> Iterator for IterMut<'a, T> {
     }
 }
 
-fn eq_link_and_node<T>(a_link: Link<T>, b_ptr: &Node<T>) -> bool {
-    a_link.map_or(false, |a_ptr| unsafe {
-        std::ptr::eq(a_ptr.as_ref(), b_ptr)
-    })
+fn eq_link_and_node<T: Ord>(a_link: Link<T>, b_ptr: &Node<T>) -> bool {
+    a_link.map_or(false, |a_ptr| std::ptr::eq(a_ptr.as_ptr(), b_ptr))
 }
 
 impl<T: Ord> Drop for Tree<T> {
@@ -382,30 +505,6 @@ impl<T: Ord> Node<T> {
     }
 }
 
-impl<T: fmt::Debug + Ord> fmt::Debug for Tree<T> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("Tree")
-            .field("len", &self.len)
-            .field("root", &self.root.map(|ptr| unsafe { ptr.as_ref() }))
-            .finish()
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Node<T> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("Node")
-            .field("value", &self.value)
-            .field("height", &self.height)
-            .field(
-                "parent",
-                &self.parent.map(|ptr| unsafe { &ptr.as_ref().value }),
-            )
-            .field("left", &self.left.map(|ptr| unsafe { ptr.as_ref() }))
-            .field("right", &self.right.map(|ptr| unsafe { ptr.as_ref() }))
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +527,24 @@ mod tests {
             assert!(tree.contains(&i));
         }
         assert!(!tree.contains(&100));
+    }
+
+    #[test]
+    #[ignore]
+    fn insert_large_logarithmic_height() {
+        let mut tree = Tree::<i32>::new();
+        let size = 100_000;
+        for i in 0..size {
+            assert_eq!(tree.len(), i as usize);
+            tree.insert(i);
+            assert!(tree.contains(&i));
+        }
+        for i in 0..size {
+            assert!(tree.contains(&i));
+        }
+
+        let height = tree.root.map(|ptr| unsafe { ptr.as_ref().height });
+        assert_eq!(height, Some(size.ilog2() as i32));
     }
 
     #[test]
@@ -454,7 +571,7 @@ mod tests {
                 assert_eq!(tree.contains(&j), false);
             }
             for j in i + 1..10 {
-                assert_eq!(tree.contains(&j), true, "{tree:#?}");
+                assert_eq!(tree.contains(&j), true);
             }
         }
     }
