@@ -105,6 +105,13 @@ impl<T: Ord> Tree<T> {
         self.len
     }
 
+    pub fn height(&self) -> i32 {
+        match self.root {
+            None => -1,
+            Some(ptr) => unsafe { ptr.as_ref().height },
+        }
+    }
+
     pub fn into_iter(self) -> IntoIter<T> {
         IntoIter { tree: self }
     }
@@ -682,5 +689,10 @@ mod tests {
             assert_eq!(iter.next(), Some(&mut i.clone()));
         }
         assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn node_size() {
+        assert_eq!(size_of::<Node<i32>>(), 32);
     }
 }
