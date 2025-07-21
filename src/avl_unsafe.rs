@@ -28,11 +28,6 @@ pub struct Iter<'a, T: Ord> {
     _marker: PhantomData<&'a T>,
 }
 
-pub struct IterMut<'a, T: Ord> {
-    next: Link<T>,
-    _marker: PhantomData<&'a mut T>,
-}
-
 impl<T: Ord> TreeOps<T> for Tree<T> {
     fn insert(&mut self, value: T) -> bool {
         let closest = self.find_closest(&value);
@@ -122,13 +117,6 @@ impl<T: Ord> Tree<T> {
 
     pub fn iter<'a>(&'a self) -> Iter<'a, T> {
         Iter {
-            next: self.first(),
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
-        IterMut {
             next: self.first(),
             _marker: PhantomData,
         }
@@ -426,18 +414,6 @@ impl<'a, T: Ord> Iterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T: Ord> Iterator for IterMut<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            self.next.map(|mut ptr| {
-                self.next = ptr.as_ref().after();
-                &mut ptr.as_mut().value
-            })
-        }
-    }
-}
-
 fn eq_link_and_node<T: Ord>(a_link: Link<T>, b_ptr: &Node<T>) -> bool {
     a_link.map_or(false, |a_ptr| std::ptr::eq(a_ptr.as_ptr(), b_ptr))
 }
@@ -661,34 +637,6 @@ mod tests {
         let mut iter = tree.iter();
         for i in 0..10 {
             assert_eq!(iter.next(), Some(&i));
-        }
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn iter_mut_asc() {
-        let mut tree = Tree::new();
-        for i in 0..10 {
-            tree.insert(i);
-        }
-
-        let mut iter = tree.iter_mut();
-        for i in 0..10 {
-            assert_eq!(iter.next(), Some(&mut i.clone()));
-        }
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn iter_mut_desc() {
-        let mut tree = Tree::new();
-        for i in (0..10).rev() {
-            tree.insert(i);
-        }
-
-        let mut iter = tree.iter_mut();
-        for i in 0..10 {
-            assert_eq!(iter.next(), Some(&mut i.clone()));
         }
         assert_eq!(iter.next(), None);
     }
