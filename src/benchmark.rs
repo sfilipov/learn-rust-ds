@@ -1,12 +1,12 @@
 use clap::Parser;
-use learn_rust_ds::{avl_unsafe, avl_vec, tree};
+use learn_rust_ds::{avl_hashmap, avl_unsafe, avl_vec, tree};
 use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "tree-benchmark")]
 #[command(about = "A tree performance testing tool")]
 struct Args {
-    #[arg(long, default_value = "1000000")]
+    #[arg(long, default_value = "100000")]
     size: usize,
 
     #[arg(long, default_value = "unsafe")]
@@ -16,6 +16,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
     let mut tree: Box<dyn tree::TreeOps<usize>> = match args.tree.as_str() {
+        "hashmap" => Box::new(avl_hashmap::Tree::new()),
         "unsafe" => Box::new(avl_unsafe::Tree::new()),
         "vec" => Box::new(avl_vec::Tree::new()),
         _ => panic!("Unexpected value for tree: {}", args.tree),

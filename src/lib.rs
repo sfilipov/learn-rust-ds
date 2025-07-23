@@ -1,3 +1,4 @@
+pub mod avl_hashmap;
 pub mod avl_unsafe;
 pub mod avl_vec;
 pub mod heapq;

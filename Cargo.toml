@@ -7,6 +7,9 @@ edition = "2024"
 clap = { version = "4.5.41", features = ["derive"] }
 rand = "0.9.1"
 
+[profile.release]
+debug = true
+
 [[bin]]
 name = "benchmark"
 path = "src/benchmark.rs"
