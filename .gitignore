@@ -1,1 +1,4 @@
 /target
+cachegrind.out.*
+flamegraph.svg
+perf.data*
