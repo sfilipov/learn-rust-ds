@@ -1,64 +1,57 @@
 use crate::tree::TreeOps;
 use std::cmp::Ordering;
-use std::marker::PhantomData;
-use std::ptr::NonNull;
+use std::mem::replace;
 
 pub struct Tree<T: Ord> {
-    root: Link<T>,
+    items: Vec<Slot<T>>,
+    head_free: Option<usize>,
+    root: Option<usize>,
     len: usize,
-    _marker: PhantomData<T>,
 }
 
 struct Node<T> {
     value: T,
     height: i32,
-    parent: Link<T>,
-    left: Link<T>,
-    right: Link<T>,
+    parent: Option<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
 }
 
-type Link<T> = Option<NonNull<Node<T>>>;
+enum Slot<T> {
+    Occupied { node: Node<T> },
+    Free { next_free: Option<usize> },
+}
 
 pub struct IntoIter<T: Ord> {
     tree: Tree<T>,
 }
 
 pub struct Iter<'a, T: Ord> {
-    next: Link<T>,
-    _marker: PhantomData<&'a T>,
-}
-
-pub struct IterMut<'a, T: Ord> {
-    next: Link<T>,
-    _marker: PhantomData<&'a mut T>,
+    tree: &'a Tree<T>,
+    next: Option<usize>,
 }
 
 impl<T: Ord> TreeOps<T> for Tree<T> {
     fn insert(&mut self, value: T) -> bool {
         let closest = self.find_closest(&value);
-        if let Some(mut ptr) = closest {
-            // SAFETY: we only create valid NonNulls from node_for_value function
-            unsafe {
-                let node = ptr.as_mut();
-
-                match value.cmp(&node.value) {
-                    Ordering::Equal => return false,
-                    ord => {
-                        let mut new = self.node_for_value(value);
-                        if ord == Ordering::Less {
-                            node.left = Some(new);
-                        } else {
-                            node.right = Some(new);
-                        }
-                        let new_node = new.as_mut();
-                        new_node.parent = Some(ptr);
-                        self.update_ancestor_heights(closest);
-                        self.rebalance_ancestors(closest);
+        if let Some(index) = closest {
+            let node = self.unwrap_occupied(index);
+            match value.cmp(&node.value) {
+                Ordering::Equal => return false,
+                ord => {
+                    let new = self.insert_node(value, Some(index));
+                    let node = self.unwrap_occupied_mut(index);
+                    if ord == Ordering::Less {
+                        node.left = Some(new);
+                    } else {
+                        node.right = Some(new);
                     }
+                    self.update_ancestor_heights(closest);
+                    self.rebalance_ancestors(closest);
                 }
             }
         } else {
-            self.root = Some(self.node_for_value(value));
+            self.root = Some(self.insert_node(value, None));
         }
         self.len += 1;
         true
@@ -66,29 +59,24 @@ impl<T: Ord> TreeOps<T> for Tree<T> {
 
     fn remove(&mut self, value: &T) -> bool {
         let closest = self.find_closest(&value);
-        let Some(ptr) = closest else {
+        let Some(index) = closest else {
             return false;
         };
 
-        unsafe {
-            let node = ptr.as_ref();
-            if value.cmp(&node.value) != Ordering::Equal {
-                return false;
-            }
+        let node = self.unwrap_occupied(index);
+        if value.cmp(&node.value) != Ordering::Equal {
+            return false;
         }
 
-        self.remove_node(ptr);
-        return true;
+        self.remove_node(index);
+        true
     }
 
     fn contains(&self, value: &T) -> bool {
         let closest = self.find_closest(value);
-        if let Some(ptr) = closest {
-            // SAFETY: we only create valid NonNulls from node_for_value function
-            unsafe {
-                let node = ptr.as_ref();
-                value.cmp(&node.value) == Ordering::Equal
-            }
+        if let Some(index) = closest {
+            let node = self.unwrap_occupied(index);
+            value.cmp(&node.value) == Ordering::Equal
         } else {
             false
         }
@@ -102,9 +90,10 @@ impl<T: Ord> TreeOps<T> for Tree<T> {
 impl<T: Ord> Tree<T> {
     pub fn new() -> Self {
         Tree {
+            items: Vec::new(),
+            head_free: None,
             root: None,
             len: 0,
-            _marker: PhantomData,
         }
     }
 
@@ -112,7 +101,7 @@ impl<T: Ord> Tree<T> {
     fn height(&self) -> i32 {
         match self.root {
             None => -1,
-            Some(ptr) => unsafe { ptr.as_ref().height },
+            Some(index) => self.unwrap_occupied(index).height,
         }
     }
 
@@ -120,288 +109,374 @@ impl<T: Ord> Tree<T> {
         IntoIter { tree: self }
     }
 
-    pub fn iter<'a>(&'a self) -> Iter<'a, T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter {
+            tree: self,
             next: self.first(),
-            _marker: PhantomData,
         }
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
-        IterMut {
-            next: self.first(),
-            _marker: PhantomData,
-        }
-    }
-
-    fn node_for_value(&self, value: T) -> NonNull<Node<T>> {
-        // SAFETY: we just created raw pointer to non null box
-        unsafe {
-            NonNull::new_unchecked(Box::into_raw(Box::new(Node {
-                value: value,
-                height: 0,
-                left: None,
-                right: None,
-                parent: None,
-            })))
-        }
-    }
-
-    fn find_closest(&self, value: &T) -> Link<T> {
+    fn find_closest(&self, value: &T) -> Option<usize> {
         let mut prev = None;
         let mut cur = self.root;
-        while let Some(ptr) = cur {
+        while let Some(index) = cur {
             prev = cur;
-            // SAFETY: we only create valid NonNulls from node_for_value function
-            unsafe {
-                let node = ptr.as_ref();
-                match value.cmp(&node.value) {
-                    Ordering::Less => cur = node.left,
-                    Ordering::Greater => cur = node.right,
-                    Ordering::Equal => return cur,
-                }
+            let node = self.unwrap_occupied(index);
+            match value.cmp(&node.value) {
+                Ordering::Less => cur = node.left,
+                Ordering::Greater => cur = node.right,
+                Ordering::Equal => return cur,
             }
         }
         return prev;
     }
 
-    fn remove_node(&mut self, node_ptr: NonNull<Node<T>>) -> T {
-        unsafe {
-            let node = node_ptr.as_ref();
-            if let (Some(_), Some(_)) = (node.left, node.right) {
-                let before = node.before_sub();
-                let before_ptr = before.expect("Node with left child should have before node");
-                let before_node = before_ptr.as_ref();
+    fn insert_node(&mut self, value: T, parent: Option<usize>) -> usize {
+        let mut node = Node::new(value);
+        node.parent = parent;
 
-                let ancestor_start = if before == node.left {
-                    before
-                } else {
-                    before_node.parent
-                };
-
-                self.replace_node(before_ptr, before_node.left);
-                self.replace_node(node_ptr, before);
-
-                self.update_ancestor_heights(ancestor_start);
-                self.rebalance_ancestors(ancestor_start);
+        if let Some(free_index) = self.head_free {
+            if let Slot::Free { next_free } = self.items[free_index] {
+                self.head_free = next_free;
+                self.items[free_index] = Slot::Occupied { node };
+                free_index
             } else {
-                let child = node.left.or(node.right);
-                self.replace_node(node_ptr, child);
-
-                self.update_ancestor_heights(node.parent);
-                self.rebalance_ancestors(node.parent);
+                unreachable!("Corrupted arena");
             }
-
-            // recreate Box and let it be dropped automatically
-            let _box_to_drop = Box::from_raw(node_ptr.as_ptr());
-            let value = _box_to_drop.value;
-            self.len -= 1;
-            value
+        } else {
+            self.items.push(Slot::Occupied { node });
+            self.items.len() - 1
         }
     }
 
-    fn replace_node(&mut self, node_ptr: NonNull<Node<T>>, new_link: Link<T>) {
-        unsafe {
-            let node = node_ptr.as_ref();
-            if let Some(mut parent_ptr) = node.parent {
-                let parent_node = parent_ptr.as_mut();
-                if eq_link_and_node(parent_node.left, node) {
-                    parent_node.left = new_link;
-                } else {
-                    parent_node.right = new_link;
-                }
+    fn remove_node(&mut self, index: usize) -> T {
+        let (node_left, node_right, node_parent) = {
+            let node = self.unwrap_occupied(index);
+            (node.left, node.right, node.parent)
+        };
+
+        if let (Some(_), Some(_)) = (node_left, node_right) {
+            let before = self.before_sub(index);
+            let before_index = before.expect("Node with left child should have before node");
+            let before_node = self.unwrap_occupied(before_index);
+
+            let ancestor_start = if before == node_left {
+                before
             } else {
-                self.root = new_link;
+                before_node.parent
+            };
+
+            self.replace_node(before_index, before_node.left);
+            self.replace_node(index, before);
+
+            self.update_ancestor_heights(ancestor_start);
+            self.rebalance_ancestors(ancestor_start);
+        } else {
+            let child = node_left.or(node_right);
+            self.replace_node(index, child);
+
+            self.update_ancestor_heights(node_parent);
+            self.rebalance_ancestors(node_parent);
+        }
+
+        let value = self.remove_node_from_arena(index);
+        self.len -= 1;
+        value
+    }
+
+    fn replace_node(&mut self, node_index: usize, new_link: Option<usize>) {
+        let (node_parent, node_left, node_right) = {
+            let node = self.unwrap_occupied(node_index);
+            (node.parent, node.left, node.right)
+        };
+        if let Some(parent_index) = node_parent {
+            let parent_node_left = self.unwrap_occupied(parent_index).left;
+            if parent_node_left == Some(node_index) {
+                self.with_occupied_mut(parent_index, |parent| parent.left = new_link);
+            } else {
+                self.with_occupied_mut(parent_index, |parent| parent.right = new_link);
+            }
+        } else {
+            self.root = new_link;
+        }
+
+        if let Some(new_index) = new_link {
+            self.with_occupied_mut(new_index, |new_node| new_node.parent = node_parent);
+
+            if node_left != new_link {
+                self.with_occupied_mut(new_index, |new_node| new_node.left = node_left);
+                if let Some(child_index) = self.unwrap_occupied(new_index).left {
+                    self.with_occupied_mut(child_index, |child| child.parent = new_link);
+                }
             }
 
-            if let Some(mut new_ptr) = new_link {
-                new_ptr.as_mut().parent = node.parent;
-
-                if !eq_link_and_node(node.left, new_ptr.as_ref()) {
-                    new_ptr.as_mut().left = node.left;
-                    if let Some(mut new_left_ptr) = new_ptr.as_ref().left {
-                        new_left_ptr.as_mut().parent = new_link;
-                    }
-                }
-
-                if !eq_link_and_node(node.right, new_ptr.as_ref()) {
-                    new_ptr.as_mut().right = node.right;
-                    if let Some(mut new_right_ptr) = new_ptr.as_ref().right {
-                        new_right_ptr.as_mut().parent = new_link;
-                    }
+            if node_right != new_link {
+                self.with_occupied_mut(new_index, |new_node| new_node.right = node_right);
+                if let Some(child_index) = self.unwrap_occupied(new_index).right {
+                    self.with_occupied_mut(child_index, |child| child.parent = new_link);
                 }
             }
         }
     }
 
-    fn first(&self) -> Link<T> {
-        unsafe {
-            let mut cur = self.root;
-            while let Some(cur_ptr) = cur {
-                match cur_ptr.as_ref().before() {
-                    None => return cur,
-                    before => cur = before,
-                }
-            }
-            None
-        }
+    fn remove_node_from_arena(&mut self, index: usize) -> T {
+        let slot = replace(
+            &mut self.items[index],
+            Slot::Free {
+                next_free: self.head_free,
+            },
+        );
+        self.head_free = Some(index);
+        let Slot::Occupied { node } = slot else {
+            unreachable!("Corrupted arena");
+        };
+        node.value
     }
 
-    fn rebalance_ancestors(&mut self, link: Link<T>) {
+    fn first(&self) -> Option<usize> {
+        let mut cur = self.root;
+        while let Some(cur_index) = cur {
+            match self.before(cur_index) {
+                None => return cur,
+                before => cur = before,
+            }
+        }
+        None
+    }
+
+    fn rebalance_ancestors(&mut self, link: Option<usize>) {
         let mut cur = link;
-        while let Some(ptr) = cur {
+        while let Some(index) = cur {
             self.rebalance(cur);
-            unsafe {
-                cur = ptr.as_ref().parent;
-            }
+            cur = self.unwrap_occupied(index).parent;
         }
     }
 
-    fn rebalance(&mut self, link: Link<T>) {
-        unsafe {
-            let Some(ptr) = link else {
-                return;
-            };
-            let node = ptr.as_ref();
-            let balance_factor = self.balance_factor(link);
-            if balance_factor > 1 {
-                let mut height_start = link;
-                if self.balance_factor(node.left) < 0 {
-                    height_start = node.left;
-                    self.rotate_left(node.left);
-                }
-                self.rotate_right(link);
-                self.update_ancestor_heights(height_start);
-            } else if balance_factor < -1 {
-                let mut height_start = link;
-                if self.balance_factor(node.right) > 0 {
-                    height_start = node.right;
-                    self.rotate_right(node.right);
-                }
-                self.rotate_left(link);
-                self.update_ancestor_heights(height_start);
+    fn rebalance(&mut self, link: Option<usize>) {
+        let Some(index) = link else {
+            return;
+        };
+        let node = self.unwrap_occupied(index);
+        let balance_factor = self.balance_factor(link);
+        if balance_factor > 1 {
+            let mut height_start = link;
+            if self.balance_factor(node.left) < 0 {
+                height_start = node.left;
+                self.rotate_left(node.left);
             }
+            self.rotate_right(link);
+            self.update_ancestor_heights(height_start);
+        } else if balance_factor < -1 {
+            let mut height_start = link;
+            if self.balance_factor(node.right) > 0 {
+                height_start = node.right;
+                self.rotate_right(node.right);
+            }
+            self.rotate_left(link);
+            self.update_ancestor_heights(height_start);
         }
     }
 
-    fn rotate_right(&mut self, x_link: Link<T>) -> Link<T> {
-        unsafe {
-            let Some(mut x_ptr) = x_link else {
-                return None;
-            };
-            let x = x_ptr.as_mut();
-            let y_link = x.left;
-            let Some(mut y_ptr) = y_link else {
-                return None;
-            };
-            let y = y_ptr.as_mut();
-            let t2 = y.right;
+    fn rotate_right(&mut self, x_link: Option<usize>) -> Option<usize> {
+        let Some(x_index) = x_link else {
+            return None;
+        };
+        let (x_left, x_parent) = {
+            let x = self.unwrap_occupied(x_index);
+            (x.left, x.parent)
+        };
+        let y_link = x_left;
+        let Some(y_index) = y_link else {
+            return None;
+        };
+        let t2_link = self.unwrap_occupied(y_index).right;
 
-            // fix parent -> y
-            if let Some(mut parent_ptr) = x.parent {
-                let parent_node = parent_ptr.as_mut();
-                if eq_link_and_node(parent_node.left, x) {
-                    parent_node.left = y_link;
-                } else {
-                    parent_node.right = y_link;
-                }
+        // fix parent -> y
+        if let Some(parent_index) = x_parent {
+            let parent_node_right = self.unwrap_occupied(parent_index).right;
+            if parent_node_right == x_link {
+                self.with_occupied_mut(parent_index, |parent| parent.right = y_link);
             } else {
-                self.root = y_link;
+                self.with_occupied_mut(parent_index, |parent| parent.left = y_link);
             }
-            y.parent = x.parent;
-
-            // fix y -> x
-            x.parent = y_link;
-            y.right = x_link;
-
-            // fix x -> t2
-            x.left = t2;
-            if let Some(mut t2_ptr) = t2 {
-                let t2_node = t2_ptr.as_mut();
-                t2_node.parent = x_link;
-            }
-            y_link
+        } else {
+            self.root = y_link;
         }
+
+        self.with_occupied_mut(y_index, |y| y.parent = x_parent);
+
+        // fix y -> x
+        self.with_occupied_mut(x_index, |x| x.parent = y_link);
+        self.with_occupied_mut(y_index, |y| y.right = x_link);
+
+        // fix x -> t2
+        self.with_occupied_mut(x_index, |x| x.left = t2_link);
+        if let Some(t2_index) = t2_link {
+            self.with_occupied_mut(t2_index, |t2| t2.parent = x_link);
+        }
+        y_link
     }
 
-    fn rotate_left(&mut self, x_link: Link<T>) -> Link<T> {
-        unsafe {
-            let Some(mut x_ptr) = x_link else {
-                return None;
-            };
-            let x = x_ptr.as_mut();
-            let y_link = x.right;
-            let Some(mut y_ptr) = y_link else {
-                return None;
-            };
-            let y = y_ptr.as_mut();
-            let t2 = y.left;
+    fn rotate_left(&mut self, x_link: Option<usize>) -> Option<usize> {
+        let Some(x_index) = x_link else {
+            return None;
+        };
+        let (x_right, x_parent) = {
+            let x = self.unwrap_occupied(x_index);
+            (x.right, x.parent)
+        };
+        let y_link = x_right;
+        let Some(y_index) = y_link else {
+            return None;
+        };
+        let t2_link = self.unwrap_occupied(y_index).left;
 
-            // fix parent -> y
-            if let Some(mut parent_ptr) = x.parent {
-                let parent_node = parent_ptr.as_mut();
-                if eq_link_and_node(parent_node.left, x) {
-                    parent_node.left = y_link;
-                } else {
-                    parent_node.right = y_link;
-                }
+        // fix parent -> y
+        if let Some(parent_index) = x_parent {
+            let parent_node_left = self.unwrap_occupied(parent_index).left;
+            if parent_node_left == x_link {
+                self.with_occupied_mut(parent_index, |parent| parent.left = y_link);
             } else {
-                self.root = y_link;
+                self.with_occupied_mut(parent_index, |parent| parent.right = y_link);
             }
-            y.parent = x.parent;
-
-            // fix y -> x
-            x.parent = y_link;
-            y.left = x_link;
-
-            // fix x -> t2
-            x.right = t2;
-            if let Some(mut t2_ptr) = t2 {
-                let t2_node = t2_ptr.as_mut();
-                t2_node.parent = x_link;
-            }
-            y_link
+        } else {
+            self.root = y_link;
         }
+
+        self.with_occupied_mut(y_index, |y| y.parent = x_parent);
+
+        // fix y -> x
+        self.with_occupied_mut(x_index, |x| x.parent = y_link);
+        self.with_occupied_mut(y_index, |y| y.left = x_link);
+
+        // fix x -> t2
+        self.with_occupied_mut(x_index, |x| x.right = t2_link);
+        if let Some(t2_index) = t2_link {
+            self.with_occupied_mut(t2_index, |t2| t2.parent = x_link);
+        }
+        y_link
     }
 
-    fn update_ancestor_heights(&self, link: Link<T>) {
+    fn update_ancestor_heights(&mut self, link: Option<usize>) {
         let mut cur = link;
-        while let Some(ptr) = cur {
-            self.update_height(cur);
-            unsafe {
-                cur = ptr.as_ref().parent;
-            }
+        while let Some(index) = cur {
+            self.update_height(index);
+            cur = self.unwrap_occupied(index).parent;
         }
     }
 
-    fn update_height(&self, link: Link<T>) {
-        if let Some(mut ptr) = link {
-            unsafe {
-                let node = ptr.as_mut();
-                let left_height = self.link_height(node.left);
-                let right_height = self.link_height(node.right);
-                node.height = 1 + left_height.max(right_height);
-            }
-        }
+    fn update_height(&mut self, index: usize) {
+        let node = self.unwrap_occupied(index);
+        let left_height = self.link_height(node.left);
+        let right_height = self.link_height(node.right);
+
+        let node = self.unwrap_occupied_mut(index);
+        node.height = 1 + left_height.max(right_height);
     }
 
-    fn balance_factor(&self, link: Link<T>) -> i32 {
-        if let Some(ptr) = link {
-            unsafe {
-                let node = ptr.as_ref();
-                let left_height = self.link_height(node.left);
-                let right_height = self.link_height(node.right);
-                return left_height - right_height;
-            }
+    fn balance_factor(&self, link: Option<usize>) -> i32 {
+        if let Some(index) = link {
+            let node = self.unwrap_occupied(index);
+            let left_height = self.link_height(node.left);
+            let right_height = self.link_height(node.right);
+            return left_height - right_height;
         } else {
             0
         }
     }
 
-    fn link_height(&self, link: Link<T>) -> i32 {
+    fn link_height(&self, link: Option<usize>) -> i32 {
         match link {
-            Some(ptr) => unsafe { ptr.as_ref().height },
+            Some(index) => self.unwrap_occupied(index).height,
             None => -1,
+        }
+    }
+
+    fn before(&self, index: usize) -> Option<usize> {
+        self.before_sub(index).or(self.before_above(index))
+    }
+
+    fn before_sub(&self, index: usize) -> Option<usize> {
+        let node = self.unwrap_occupied(index);
+        let Some(mut cur) = node.left else {
+            return None;
+        };
+
+        while let Some(right) = self.unwrap_occupied(cur).right {
+            cur = right;
+        }
+        Some(cur)
+    }
+
+    fn before_above(&self, index: usize) -> Option<usize> {
+        let node = self.unwrap_occupied(index);
+        let mut cur_index = index;
+        let mut cur = node;
+        while let Some(parent_index) = cur.parent {
+            let parent = self.unwrap_occupied(parent_index);
+            if parent.left == Some(cur_index) {
+                cur_index = parent_index;
+                cur = parent;
+            } else {
+                return cur.parent;
+            }
+        }
+        None
+    }
+
+    fn after(&self, index: usize) -> Option<usize> {
+        self.after_sub(index).or(self.after_above(index))
+    }
+
+    fn after_sub(&self, index: usize) -> Option<usize> {
+        let node = self.unwrap_occupied(index);
+        let Some(mut cur) = node.right else {
+            return None;
+        };
+
+        while let Some(left) = self.unwrap_occupied(cur).left {
+            cur = left;
+        }
+        Some(cur)
+    }
+
+    fn after_above(&self, index: usize) -> Option<usize> {
+        let node = self.unwrap_occupied(index);
+        let mut cur_index = index;
+        let mut cur = node;
+        while let Some(parent_index) = cur.parent {
+            let parent = self.unwrap_occupied(parent_index);
+            if parent.right == Some(cur_index) {
+                cur_index = parent_index;
+                cur = parent;
+            } else {
+                return cur.parent;
+            }
+        }
+        None
+    }
+
+    fn unwrap_occupied(&self, index: usize) -> &Node<T> {
+        match &self.items[index] {
+            Slot::Occupied { node } => node,
+            Slot::Free { .. } => panic!("Called unwrap_occupied on free slot"),
+        }
+    }
+
+    fn unwrap_occupied_mut(&mut self, index: usize) -> &mut Node<T> {
+        match &mut self.items[index] {
+            Slot::Occupied { node } => node,
+            Slot::Free { .. } => panic!("Called unwrap_occupied on free slot"),
+        }
+    }
+
+    fn with_occupied_mut<F>(&mut self, index: usize, f: F)
+    where
+        F: FnOnce(&mut Node<T>),
+    {
+        match &mut self.items[index] {
+            Slot::Occupied { node } => f(node),
+            Slot::Free { .. } => panic!("Called unwrap_occupied on free slot"),
         }
     }
 }
@@ -416,30 +491,12 @@ impl<T: Ord> Iterator for IntoIter<T> {
 impl<'a, T: Ord> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            self.next.map(|ptr| {
-                let node = ptr.as_ref();
-                self.next = node.after();
-                &node.value
-            })
-        }
+        self.next.map(|index| {
+            let node = self.tree.unwrap_occupied(index);
+            self.next = self.tree.after(index);
+            &node.value
+        })
     }
-}
-
-impl<'a, T: Ord> Iterator for IterMut<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            self.next.map(|mut ptr| {
-                self.next = ptr.as_ref().after();
-                &mut ptr.as_mut().value
-            })
-        }
-    }
-}
-
-fn eq_link_and_node<T: Ord>(a_link: Link<T>, b_ptr: &Node<T>) -> bool {
-    a_link.map_or(false, |a_ptr| std::ptr::eq(a_ptr.as_ptr(), b_ptr))
 }
 
 impl<T: Ord> Drop for Tree<T> {
@@ -451,68 +508,14 @@ impl<T: Ord> Drop for Tree<T> {
 }
 
 impl<T: Ord> Node<T> {
-    fn before(&self) -> Link<T> {
-        self.before_sub().or(self.before_above())
-    }
-
-    fn before_sub(&self) -> Link<T> {
-        let Some(mut cur) = self.left else {
-            return None;
-        };
-
-        unsafe {
-            while let Some(right) = cur.as_ref().right {
-                cur = right;
-            }
+    pub fn new(value: T) -> Self {
+        Node {
+            value,
+            height: 0,
+            parent: None,
+            left: None,
+            right: None,
         }
-        Some(cur)
-    }
-
-    fn before_above(&self) -> Link<T> {
-        let mut cur = self;
-        while let Some(parent_ptr) = cur.parent {
-            unsafe {
-                let parent = parent_ptr.as_ref();
-                if eq_link_and_node(parent.left, cur) {
-                    cur = parent;
-                } else {
-                    return cur.parent;
-                }
-            }
-        }
-        None
-    }
-
-    fn after(&self) -> Link<T> {
-        self.after_sub().or(self.after_above())
-    }
-
-    fn after_sub(&self) -> Link<T> {
-        let Some(mut cur) = self.right else {
-            return None;
-        };
-
-        unsafe {
-            while let Some(left) = cur.as_ref().left {
-                cur = left;
-            }
-        }
-        Some(cur)
-    }
-
-    fn after_above(&self) -> Link<T> {
-        let mut cur = self;
-        while let Some(parent_ptr) = cur.parent {
-            unsafe {
-                let parent = parent_ptr.as_ref();
-                if eq_link_and_node(parent.right, cur) {
-                    cur = parent;
-                } else {
-                    return cur.parent;
-                }
-            }
-        }
-        None
     }
 }
 
@@ -592,7 +595,7 @@ mod tests {
             tree.insert(i);
         }
         assert_eq!(
-            tree.first().map(|ptr| unsafe { ptr.as_ref().value }),
+            tree.first().map(|index| tree.unwrap_occupied(index).value),
             Some(0)
         );
     }
@@ -604,7 +607,7 @@ mod tests {
             tree.insert(i);
         }
         assert_eq!(
-            tree.first().map(|ptr| unsafe { ptr.as_ref().value }),
+            tree.first().map(|index| tree.unwrap_occupied(index).value),
             Some(0)
         );
     }
@@ -661,34 +664,6 @@ mod tests {
         let mut iter = tree.iter();
         for i in 0..10 {
             assert_eq!(iter.next(), Some(&i));
-        }
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn iter_mut_asc() {
-        let mut tree = Tree::new();
-        for i in 0..10 {
-            tree.insert(i);
-        }
-
-        let mut iter = tree.iter_mut();
-        for i in 0..10 {
-            assert_eq!(iter.next(), Some(&mut i.clone()));
-        }
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn iter_mut_desc() {
-        let mut tree = Tree::new();
-        for i in (0..10).rev() {
-            tree.insert(i);
-        }
-
-        let mut iter = tree.iter_mut();
-        for i in 0..10 {
-            assert_eq!(iter.next(), Some(&mut i.clone()));
         }
         assert_eq!(iter.next(), None);
     }
