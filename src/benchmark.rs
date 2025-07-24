@@ -43,22 +43,22 @@ fn main() {
     let end = Instant::now();
 
     println!(
-        "Inserts took {} seconds",
-        inserted.saturating_duration_since(start).as_secs_f32()
+        "Inserts took {} ms",
+        inserted.saturating_duration_since(start).as_micros() as f32 / 1000.0
     );
     println!(
-        "Checking contains took {} seconds",
+        "Checking contains took {} ms",
         checked_contains
             .saturating_duration_since(inserted)
-            .as_secs_f32()
+            .as_micros() as f32
+            / 1000.0
     );
     println!(
-        "Removals took {} seconds",
-        end.saturating_duration_since(checked_contains)
-            .as_secs_f32()
+        "Removals took {} ms",
+        end.saturating_duration_since(checked_contains).as_micros() as f32 / 1000.0
     );
     println!(
-        "Total {} seconds",
-        end.saturating_duration_since(start).as_secs_f32()
+        "Total {} ms",
+        end.saturating_duration_since(start).as_micros() as f32 / 1000.0
     );
 }
